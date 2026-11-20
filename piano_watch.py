@@ -11,6 +11,7 @@
 """
 import argparse
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -57,7 +58,13 @@ def fetch_day(d: date, offline: Path | None):
 
 
 # ---------------------------------------------------------------- 解析
+def is_time(hm: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,2}:\d{2}", hm or ""))
+
+
 def to_min(hm: str) -> int:
+    if not is_time(hm):
+        return 9999  # 時間未定（データ上は "9999" など）は最後に並べる
     h, m = hm.split(":")
     return int(h) * 60 + int(m)
 
@@ -97,9 +104,9 @@ def parse_day(data: dict, slugs: set[str]) -> list[dict]:
                 continue
             se = ((e.get("time") or {}).get("start_end") or [{}])
             se = se[0] if isinstance(se, list) and se else {}
-            start = se.get("start", "")
-            if not start:
-                continue
+            start = se.get("start", "") or ""
+            if not is_time(start):
+                start = ""  # 時間未定
             rows.append({"room": (e.get("room") or "").strip(), "start": start,
                          "end": se.get("end", ""),
                          "chars": [c for c in (e.get("character") or []) if isinstance(c, dict)]})
@@ -108,10 +115,12 @@ def parse_day(data: dict, slugs: set[str]) -> list[dict]:
             hit = [c for c in r["chars"] if c.get("slug") in slugs]
             if not hit:
                 continue
-            end = r["end"]
-            if not end:
-                nxt = next((x for x in rows[i + 1:] if x["room"] == r["room"]), None)
-                end = nxt["start"] if nxt else sec_end
+            end = r["end"] if is_time(r["end"]) else ""
+            if not r["start"]:
+                end = ""
+            elif not end:
+                nxt = next((x for x in rows[i + 1:] if x["room"] == r["room"] and x["start"]), None)
+                end = nxt["start"] if nxt else (sec_end if is_time(sec_end) else "")
             for c in hit:
                 found.append({"slug": c["slug"], "name": c.get("name", ""),
                               "place": place, "floor": floor, "room": r["room"],
@@ -127,9 +136,17 @@ def md(ds: str) -> str:
 
 
 def slot_text(s: dict) -> str:
-    t = f"{s['start']}〜{s['end']}" if s["end"] else f"{s['start']}〜"
-    where = " ".join(x for x in (s["place"], s["room"]) if x)
+    if not s["start"]:
+        t = "時間未定"
+    else:
+        t = f"{s['start']}〜{s['end']}" if s["end"] else f"{s['start']}〜"
+    room = "部屋未定" if s["room"] in ("", "未定") else s["room"]
+    where = " ".join(x for x in (s["place"], room) if x)
     return f"{t}　{where}"
+
+
+def is_tbd(s: dict) -> bool:
+    return not s["start"] or s["room"] in ("", "未定")
 
 
 def key(s: dict) -> tuple:
@@ -168,24 +185,31 @@ def build_ics(state: dict, cfg: dict) -> str:
         d = date.fromisoformat(ds)
         first_of_day = {}
         for s in state[ds]:
-            sh, sm = map(int, s["start"].split(":"))
-            start = datetime(d.year, d.month, d.day, sh, sm, tzinfo=JST)
-            if s["end"]:
-                eh, em = map(int, s["end"].split(":"))
-                end = datetime(d.year, d.month, d.day, eh, em, tzinfo=JST)
-            else:
-                end = start + timedelta(hours=1)
-            if end <= start:
-                end = start + timedelta(hours=1)
+            room = "部屋・時間未定" if is_tbd(s) else s["room"] or s["place"]
             title = (f"{cfg.get('title_prefix', '')}{emoji.get(s['slug'], '')} "
-                     f"{s['name']}（{s['room'] or s['place']}）").strip()
+                     f"{s['name']}（{room}）").strip()
             desc = "\n".join(x for x in (
                 f"{s['place']}（{s['floor']}）" if s["floor"] else s["place"],
-                s["room"], f"{s['start']}〜{s['end']}", "", SCHEDULE_URL) if x is not None)
-            uid = f"{s['slug']}-{ds}-{s['room'] or s['place']}-{s['start']}@puroland-calendar"
-            lines += ["BEGIN:VEVENT", f"UID:{esc(uid)}", f"DTSTAMP:{stamp}",
-                      f"DTSTART:{start.astimezone(timezone.utc).strftime(fmt)}",
-                      f"DTEND:{end.astimezone(timezone.utc).strftime(fmt)}",
+                slot_text(s), "", SCHEDULE_URL) if x is not None)
+            uid = f"{s['slug']}-{ds}-{s['room'] or s['place']}-{s['start'] or 'tbd'}@puroland-calendar"
+            lines += ["BEGIN:VEVENT", f"UID:{esc(uid)}", f"DTSTAMP:{stamp}"]
+            if s["start"]:
+                sh, sm = map(int, s["start"].split(":"))
+                start = datetime(d.year, d.month, d.day, sh, sm, tzinfo=JST)
+                if s["end"]:
+                    eh, em = map(int, s["end"].split(":"))
+                    end = datetime(d.year, d.month, d.day, eh, em, tzinfo=JST)
+                else:
+                    end = start + timedelta(hours=1)
+                if end <= start:
+                    end = start + timedelta(hours=1)
+                lines += [f"DTSTART:{start.astimezone(timezone.utc).strftime(fmt)}",
+                          f"DTEND:{end.astimezone(timezone.utc).strftime(fmt)}"]
+            else:  # 時間未定は終日予定
+                lines += [f"DTSTART;VALUE=DATE:{d.strftime('%Y%m%d')}",
+                          f"DTEND;VALUE=DATE:{(d + timedelta(days=1)).strftime('%Y%m%d')}",
+                          "TRANSP:TRANSPARENT"]
+            lines += [
                       f"SUMMARY:{esc(title)}",
                       f"LOCATION:{esc('サンリオピューロランド ' + s['place'])}",
                       f"DESCRIPTION:{esc(desc)}", f"URL:{SCHEDULE_URL}"]
@@ -253,6 +277,10 @@ def main() -> None:
             continue
         if not slots and d == today:
             continue  # 当日は終わった枠がデータから消えることがあるため、記録を残す
+        if slots and all(is_tbd(x) for x in prev) and not any(is_tbd(x) for x in slots):
+            new[ds] = slots  # 部屋・時間が未定から確定になった → すぐ反映
+            pending.pop(ds, None)
+            continue
         # 既にある予定の変更・取りやめは、サイトの更新途中を拾わないよう2回続けて確認できたら反映
         if pending.get(ds) == slots:
             pending.pop(ds, None)
@@ -290,6 +318,8 @@ def main() -> None:
             lines += [f"🆕 {md(ds)}"] + [f"　{emo.get(s['slug'], '')}{s['name']}　{slot_text(s)}" for s in n]
         elif not n:
             lines += [f"🗑️ {md(ds)} の掲載がなくなりました"]
+        elif all(is_tbd(x) for x in o) and not any(is_tbd(x) for x in n):
+            lines += [f"⏰ {md(ds)} の部屋・時間が決まりました"] + [f"　{emo.get(s['slug'], '')}{s['name']}　{slot_text(s)}" for s in n]
         else:
             lines += [f"✏️ {md(ds)} の内容が変わりました"] + [f"　{emo.get(s['slug'], '')}{s['name']}　{slot_text(s)}" for s in n]
 
