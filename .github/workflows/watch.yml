@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: "15 0-14/2,22 * * *"   # UTC表記。日本時間 7:15, 9:15, ..., 23:15
   workflow_dispatch:
+    inputs:
+      test:
+        description: "LINEにテストメッセージを送る（送信先の確認用）"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -41,6 +46,13 @@ jobs:
       - name: Check schedule
         run: python3 piano_watch.py
 
+      - name: Test message
+        if: inputs.test
+        run: |
+          if [ ! -f message.txt ]; then
+            echo "✅ テスト送信です。このメッセージが届いていれば、通知の設定は正しく完了しています。" > message.txt
+          fi
+
       - name: Commit
         run: |
           git add data docs
@@ -58,13 +70,17 @@ jobs:
         if: hashFiles('message.txt') != ''
         env:
           LINE_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_TO }}   # 送信先のユーザーID（カンマ区切り）
         run: |
-          if [ -z "$LINE_TOKEN" ]; then
-            echo "- LINE のトークン（LINE_CHANNEL_ACCESS_TOKEN）が登録されていません。" >> errors.md
+          if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_TO" ]; then
+            echo "- LINE のトークン（LINE_CHANNEL_ACCESS_TOKEN）または送信先（LINE_TO）が登録されていません。" >> errors.md
             exit 0
           fi
-          jq -Rs '{messages: [{type: "text", text: .}]}' message.txt > payload.json
-          code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST https://api.line.me/v2/bot/message/broadcast \
+          # 登録したユーザーIDの人だけに送る（友だち全員への一斉送信はしない）
+          jq -Rs --arg to "$LINE_TO" \
+            '{to: ($to | split(",") | map(gsub("\\s"; "")) | map(select(length > 0))), messages: [{type: "text", text: .}]}' \
+            message.txt > payload.json
+          code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST https://api.line.me/v2/bot/message/multicast \
             -H "Authorization: Bearer $LINE_TOKEN" -H "Content-Type: application/json" -d @payload.json)
           echo "LINE: HTTP $code"; cat resp.txt; echo
           if [ "$code" != "200" ]; then
