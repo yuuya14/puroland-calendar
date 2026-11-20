@@ -1,0 +1,88 @@
+name: Watch greeting
+
+# サンリオピューロランドのグリーティング日程を2時間おき（7時〜23時台・日本時間）に確認し、
+# 対象キャラクターの出演予定が掲載・変更されたら、カレンダーを更新してLINEに通知する。
+# 取得に失敗したときは Issue で知らせ、復旧したら自動で閉じる。
+
+on:
+  schedule:
+    - cron: "15 0-14/2,22 * * *"   # UTC表記。日本時間 7:15, 9:15, ..., 23:15
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "piano_watch.py"
+      - "config.json"
+      - ".github/workflows/watch.yml"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: repo-write
+  cancel-in-progress: false
+
+env:
+  ERROR_TITLE: "⚠️ グリーティング日程の取得に失敗しました"
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check schedule
+        run: python3 piano_watch.py
+
+      - name: Commit
+        run: |
+          git add data docs
+          if git diff --cached --quiet; then
+            echo "変更なし"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update greeting schedule"
+          git pull --rebase origin main
+          git push
+
+      - name: Send LINE
+        if: hashFiles('message.txt') != ''
+        env:
+          LINE_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$LINE_TOKEN" ]; then
+            echo "- LINE のトークン（LINE_CHANNEL_ACCESS_TOKEN）が登録されていません。" >> errors.md
+            exit 0
+          fi
+          jq -Rs '{messages: [{type: "text", text: .}]}' message.txt > payload.json
+          code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST https://api.line.me/v2/bot/message/broadcast \
+            -H "Authorization: Bearer $LINE_TOKEN" -H "Content-Type: application/json" -d @payload.json)
+          echo "LINE: HTTP $code"; cat resp.txt; echo
+          if [ "$code" != "200" ]; then
+            echo "- LINE への送信に失敗しました（HTTP $code）: $(cat resp.txt)" >> errors.md
+          fi
+
+      - name: Notify errors / close recovered
+        run: |
+          open=$(gh issue list --state open --search "\"$ERROR_TITLE\" in:title" --json number --jq '.[].number')
+          if [ -s errors.md ]; then
+            if [ -z "$open" ]; then
+              {
+                echo "自動取得で次のエラーが発生しました。復旧すると、このIssueは自動で閉じられます。"
+                echo
+                cat errors.md
+              } > err.md
+              gh issue create --title "$ERROR_TITLE" --body-file err.md
+            fi
+          else
+            for n in $open; do gh issue close "$n" --comment "✅ 復旧しました。"; done
+          fi

@@ -1,0 +1,24 @@
+{
+  "_comment": "通知したいキャラクターを追加できます。slug はキャラクターページURLの末尾（例: https://www.puroland.jp/character/mysweetpiano/ → mysweetpiano）",
+  "title_prefix": "🏰",
+  "characters": [
+    {
+      "slug": "mysweetpiano",
+      "name": "マイスウィートピアノ",
+      "emoji": "🎹"
+    },
+    {
+      "slug": "usahana",
+      "name": "ウサハナ",
+      "emoji": "🐰"
+    },
+    {
+      "slug": "bonbonribbon",
+      "name": "ぼんぼんりぼん",
+      "emoji": "🎀"
+    }
+  ],
+  "days_ahead": 45,
+  "reminder_time": "20:00",
+  "calendar_name": "ピューロランド グリーティング"
+}
