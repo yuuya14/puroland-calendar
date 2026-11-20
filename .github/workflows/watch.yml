@@ -49,7 +49,9 @@ jobs:
       - name: Test message
         if: inputs.test
         run: |
-          if [ ! -f message.txt ]; then
+          if [ -f message.txt ]; then
+            { echo "✅ テスト送信です（今回は更新情報もあわせてお送りします）。"; echo; cat message.txt; } > m.txt && mv m.txt message.txt
+          else
             echo "✅ テスト送信です。このメッセージが届いていれば、通知の設定は正しく完了しています。" > message.txt
           fi
 

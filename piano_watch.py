@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "data" / "appearances.json"
+PENDING = ROOT / "data" / "pending.json"   # 変更・取りやめの確認待ち（2回続けて同じ結果なら確定）
 ICS = ROOT / "docs" / "greeting.ics"
 JST = ZoneInfo("Asia/Tokyo")
 WEEKDAYS = "月火水木金土日"
@@ -59,6 +60,17 @@ def fetch_day(d: date, offline: Path | None):
 def to_min(hm: str) -> int:
     h, m = hm.split(":")
     return int(h) * 60 + int(m)
+
+
+def count_entries(data: dict) -> int:
+    """その日のグリーティング枠（全キャラクター）の数。0なら未公開か更新途中とみなす。"""
+    greeting = (data.get("schedule") or {}).get("greeting") or {}
+    n = 0
+    for section in greeting.values():
+        if isinstance(section, dict):
+            e = section.get("schedule")
+            n += len(e) if isinstance(e, (dict, list)) else 0
+    return n
 
 
 def parse_day(data: dict, slugs: set[str]) -> list[dict]:
@@ -202,10 +214,12 @@ def main() -> None:
     slugs = {c["slug"] for c in cfg["characters"]}
     first_run = not STATE.exists()
     old: dict = {} if first_run else json.loads(STATE.read_text(encoding="utf-8"))
+    pending: dict = json.loads(PENDING.read_text(encoding="utf-8")) if PENDING.exists() else {}
+    pending_before = json.dumps(pending, sort_keys=True)
     new = {k: v for k, v in old.items()}
     today = date.fromisoformat(args.today) if args.today else datetime.now(JST).date()
 
-    errors, fetched, misses = [], [], 0
+    errors, fetched, misses, responded = [], [], 0, 0
     for i in range(cfg.get("days_ahead", 45)):
         d = today + timedelta(days=i)
         try:
@@ -219,20 +233,40 @@ def main() -> None:
                 break
             continue
         misses = 0
+        responded += 1
+        ds = d.isoformat()
+        if count_entries(data) == 0:
+            continue  # グリーティングの枠が1つもない日（休館日・未公開・更新途中）は判定しない
         try:
             slots = parse_day(data, slugs)
         except Exception as e:  # noqa: BLE001
-            errors.append(f"- {md(d.isoformat())} のデータを解析できませんでした: {e}")
+            errors.append(f"- {md(ds)} のデータを解析できませんでした: {e}")
             continue
-        fetched.append(d.isoformat())
-        if slots:
-            new[d.isoformat()] = slots
-        elif d == today and old.get(d.isoformat()):
-            pass  # 当日は終わった枠がデータから消えることがあるため、記録を残す
+        fetched.append(ds)
+        prev = old.get(ds, [])
+        if sorted(map(key, prev)) == sorted(map(key, slots)):
+            pending.pop(ds, None)
+            continue
+        if not prev:
+            new[ds] = slots  # 新しく掲載された → すぐ反映
+            pending.pop(ds, None)
+            continue
+        if not slots and d == today:
+            continue  # 当日は終わった枠がデータから消えることがあるため、記録を残す
+        # 既にある予定の変更・取りやめは、サイトの更新途中を拾わないよう2回続けて確認できたら反映
+        if pending.get(ds) == slots:
+            pending.pop(ds, None)
+            if slots:
+                new[ds] = slots
+            else:
+                new.pop(ds, None)
         else:
-            new.pop(d.isoformat(), None)
+            pending[ds] = slots
 
     if not fetched:
+        if responded and not errors:
+            print("グリーティングの枠が載っている日がありません（更新途中の可能性）。今回は判定しません。")
+            return
         if not errors:
             errors.append("- 公開されている日別データが1日分も見つかりませんでした。サイトの構成が変わった可能性があります。")
         (ROOT / "errors.md").write_text("\n".join(errors) + "\n", encoding="utf-8")
@@ -260,6 +294,9 @@ def main() -> None:
             lines += [f"✏️ {md(ds)} の内容が変わりました"] + [f"　{emo.get(s['slug'], '')}{s['name']}　{slot_text(s)}" for s in n]
 
     STATE.parent.mkdir(exist_ok=True)
+    pending = {k: v for k, v in pending.items() if k >= today.isoformat()}
+    if json.dumps(pending, sort_keys=True) != pending_before:
+        PENDING.write_text(json.dumps(pending, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     if new != old or first_run:
         STATE.write_text(json.dumps(new, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         ICS.parent.mkdir(exist_ok=True)
