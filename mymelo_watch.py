@@ -25,7 +25,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SEEN = ROOT / "data" / "mymelo_seen.json"
-MESSAGE = ROOT / "message_mymelo.txt"
+MESSAGE_GLOB = "message_mymelo_*.txt"   # LINEの吹き出し1つ＝ファイル1つ（_1, _2, ...）
+BUBBLE_CHARS = 4500                       # LINEの1吹き出しは最大5000文字。余裕を持たせる
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130 Safari/537.36")
 GNEWS = "https://news.google.com/rss/search?q={q}&hl=ja&gl=JP&ceid=JP:ja"
@@ -64,6 +65,9 @@ def clean_title(title: str, source: str = "") -> str:
     t = re.sub(r"(の画像|\(写真)\s*\d+\s*/\s*\d+\)?$", "", t)
     t = re.sub(r"[（(]\s*\d+\s*/\s*\d+\s*[)）]$", "", t)
     t = re.sub(r"[（(]写真\s*\d+\s*/\s*\d+[)）]", "", t)
+    t = re.sub(r"^画像・写真\s*[|｜]\s*", "", t)
+    t = re.sub(r"\s*\d+枚目(の写真・画像)?$", "", t)
+    t = re.sub(r"\s+-\s+[^-]{1,40}$", "", t) if not source else t  # Googleアラートの「 - 媒体名」
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -189,19 +193,46 @@ def main() -> None:
         meta = "・".join(x for x in (it["source"], f"{d.month}/{d.day}" if d else "") if x)
         return f"🔸 {it['title']}\n　{meta}\n　{it['link']}"
 
+    for old_file in ROOT.glob(MESSAGE_GLOB):
+        old_file.unlink()
     if first_run and texts:
         head = ("📣 マイメロディの外部イベント情報の見張りを開始しました。\n"
                 "見つかったらお知らせします（AI判定なしのため、関係ない記事が混ざることがあります）。")
-        body = (["", "▼ 直近の候補"] + [line(i) for i in new[:5]]) if new else []
-        MESSAGE.write_text("\n".join([head, *body]), encoding="utf-8")
+        if new:
+            head += f"\n\n▼ 直近の候補（{len(new)}件）"
     elif new:
-        shown = new[:10]
-        msg = [f"📣 マイメロディの外部イベント候補が見つかりました（{len(new)}件）", ""]
-        msg += [line(i) + "\n" for i in shown]
-        if len(new) > len(shown):
-            msg.append(f"ほか {len(new) - len(shown)}件")
-        MESSAGE.write_text("\n".join(msg).strip(), encoding="utf-8")
-    print(MESSAGE.read_text(encoding="utf-8") if MESSAGE.exists() else f"新しい候補なし（記事{len(items)}件を確認）")
+        head = f"📣 マイメロディの外部イベント候補が見つかりました（{len(new)}件）"
+    else:
+        head = ""
+    if head:
+        # 吹き出しに分けて全件送る（1回の送信で吹き出しは最大5つ。ピューロランドの通知用に1つ空けておく）
+        max_bubbles = int(os.environ.get("MYMELO_MAX_BUBBLES", "4"))
+        bubbles, cur = [], head
+        for i, it in enumerate(new):
+            block = "\n\n" + line(it)
+            if len(cur) + len(block) > BUBBLE_CHARS:
+                bubbles.append(cur)
+                cur = f"（続き {len(bubbles) + 1}）"
+                if len(bubbles) == max_bubbles - 1 and \
+                        sum(len("\n\n" + line(x)) for x in new[i:]) + len(cur) > BUBBLE_CHARS:
+                    # 最後の吹き出しにも収まらない分は件数だけ伝える
+                    rest = []
+                    for x in new[i:]:
+                        b = "\n\n" + line(x)
+                        if len(cur) + len(b) + 40 > BUBBLE_CHARS:
+                            break
+                        cur += b
+                        rest.append(x)
+                    cur += f"\n\nほか {len(new) - i - len(rest)}件（入りきりませんでした）"
+                    break
+            cur += block
+        bubbles.append(cur)
+        for n, text in enumerate(bubbles, 1):
+            (ROOT / f"message_mymelo_{n}.txt").write_text(text.strip(), encoding="utf-8")
+        print("\n\n----- 吹き出しの区切り -----\n\n".join(bubbles))
+        print(f"\n（吹き出し {len(bubbles)}個 / 候補 {len(new)}件）")
+    else:
+        print(f"新しい候補なし（記事{len(items)}件を確認）")
 
     if errors and not texts:
         with open(ROOT / "errors.md", "a", encoding="utf-8") as f:

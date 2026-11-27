@@ -75,7 +75,7 @@ jobs:
           git push
 
       - name: Send LINE
-        if: hashFiles('message.txt', 'message_mymelo.txt') != ''
+        if: hashFiles('message.txt', 'message_mymelo_*.txt') != ''
         env:
           LINE_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_TO: ${{ secrets.LINE_TO }}   # 送信先のユーザーID（カンマ区切り）
@@ -86,7 +86,7 @@ jobs:
           fi
           # 登録したユーザーIDの人だけに送る（友だち全員への一斉送信はしない）
           # グリーティング日程とマイメロ外部イベントは、1回の送信に別々の吹き出しでまとめる
-          msgs=$(for f in message.txt message_mymelo.txt; do [ -s "$f" ] && jq -Rs '{type: "text", text: .}' "$f"; done | jq -s '.')
+          msgs=$(for f in message.txt message_mymelo_*.txt; do [ -s "$f" ] && jq -Rs '{type: "text", text: .}' "$f"; done | jq -s '.')
           jq -n --arg to "$LINE_TO" --argjson m "$msgs" \
             '{to: ($to | split(",") | map(gsub("\\s"; "")) | map(select(length > 0))), messages: $m}' > payload.json
           code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST https://api.line.me/v2/bot/message/multicast \
