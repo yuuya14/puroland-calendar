@@ -32,19 +32,23 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 GNEWS = "https://news.google.com/rss/search?q={q}&hl=ja&gl=JP&ceid=JP:ja"
 JST = timezone(timedelta(hours=9))
 
-# ---- 絞り込みのルール（タイトルと概要で判定） ----------------------------------
+# ---- 絞り込みのルール ---------------------------------------------------------
 CHARACTER = ("マイメロディ", "マイメロ", "MY MELODY", "MYMELODY")
-# グリーティングそのものを表す言葉 → 含まれていれば候補
+# タイトルにあれば候補：グリーティングそのものを表す言葉
 STRONG = ("グリーティング", "撮影会", "フォトセッション", "ハイタッチ", "握手", "ふれあい",
-          "ステージ", "ショー", "キャラクターショー", "に会える", "に会いに", "と会える")
-# 会えるイベントのこともあるが、グッズ紹介にも使われる言葉 → グッズ系の言葉が無いときだけ候補
-WEAK = ("会える", "会いに", "やってくる", "やって来る", "来店", "来場", "登場", "遊びに来る")
+          "ステージ", "ショー", "に会える", "に会いに", "と会える")
+# タイトルにあれば候補（ただしグッズ系の言葉が無いときだけ）
+WEAK = ("会える", "会いに", "やってくる", "やって来る", "来店", "来場", "遊びに来る")
+# 本文（Googleアラートの抜粋）だけで判定するときに使う、より確実な言葉
+CORE = ("グリーティング", "撮影会", "ハイタッチ", "握手会", "ふれあい")
 GOODS = ("グッズ", "フード", "メニュー", "スイーツ", "カフェ", "発売", "販売", "アイテム",
          "商品", "コラボ", "限定品", "プレゼント", "キャンペーン", "ボトル", "コスメ", "化粧",
-         "雑貨", "ポップアップ", "ストア", "ショップ", "デザイン", "パッケージ")
+         "雑貨", "ポップアップ", "ストア", "ショップ", "デザイン", "パッケージ", "新作", "予約",
+         "パーカー", "アパレル", "ファッション", "ウェア", "カトラリー", "食器", "文具", "ステーショナリー",
+         "絵本", "書籍", "雑誌", "付録", "おもちゃ", "玩具")
 # 通知しないもの（ピューロランドは別の仕組みで見ている／明らかに会えるイベントではないもの）
 EXCLUDE = ("ピューロランド", "ピューロ", "びょんわぁ", "プラモデル", "はんこ", "プライズ",
-           "ホビーショー", "おもちゃショー", "ＣＤ", "CD", "アニメ", "映画", "ガチャ",
+           "ホビーショー", "おもちゃショー", "CD", "アニメ", "映画", "ガチャ",
            "一番くじ", "ぬいぐるみ", "ゲーム", "アプリ")
 
 
@@ -71,17 +75,50 @@ def clean_title(title: str, source: str = "") -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
-def is_candidate(text: str) -> bool:
-    t = norm(text)
-    if not any(norm(c) in t for c in CHARACTER):
+def _has(t: str, words) -> bool:
+    return any(norm(w) in t for w in words)
+
+
+def is_candidate(title: str, summary: str = "") -> bool:
+    """タイトル中心で判定する。抜粋（Googleアラート）は、マイメロの近くに確実な言葉があるときだけ使う。"""
+    t, s = norm(title), norm(summary)
+    if _has(t, EXCLUDE):
         return False
-    if any(norm(x) in t for x in EXCLUDE):
+    if _has(t, CHARACTER):
+        if _has(t, STRONG):
+            return True
+        return _has(t, WEAK) and not _has(t, GOODS)
+    # タイトルにマイメロが無い記事：抜粋の中で「マイメロ」と「グリーティング」等が近く（40文字以内）にあること
+    if _has(t, GOODS) or _has(s, EXCLUDE):
         return False
-    if any(norm(x) in t for x in STRONG):
-        return True
-    if any(norm(x) in t for x in WEAK) and not any(norm(x) in t for x in GOODS):
-        return True
-    return False
+    pos_c = [m.start() for c in CHARACTER for m in re.finditer(re.escape(norm(c)), s)]
+    pos_k = [m.start() for k in CORE for m in re.finditer(re.escape(norm(k)), s)]
+    return any(abs(a - b) <= 40 for a in pos_c for b in pos_k)
+
+
+# グッズ情報として通知しないもの（グッズではない話題）
+EXCLUDE_GOODS = ("アニメ", "映画", "ゲーム", "アプリ", "びょんわぁ", "ショー", "ステージ")
+GOODS_TITLE_HINT = ("サンリオ",)  # タイトルにマイメロが無くても、抜粋で判定してよい記事の目印
+
+
+def classify(title: str, summary: str, goods_enabled: bool) -> str | None:
+    """'event'（会えるイベント）/ 'goods'（グッズ情報）/ None（対象外）"""
+    if is_candidate(title, summary):
+        return "event"
+    if not goods_enabled:
+        return None
+    t, s = norm(title), norm(summary)
+    if _has(t, EXCLUDE_GOODS):
+        return None
+    if _has(t, CHARACTER):
+        return "goods" if _has(t, GOODS) else None
+    # タイトルが「サンリオキャラクターズの○○」型：抜粋でマイメロとグッズの言葉が近くにあれば対象
+    if _has(t, GOODS_TITLE_HINT) and _has(t, GOODS):
+        pos_c = [m.start() for c in CHARACTER for m in re.finditer(re.escape(norm(c)), s)]
+        pos_g = [m.start() for g in GOODS for m in re.finditer(re.escape(norm(g)), s)]
+        if any(abs(a - b) <= 40 for a in pos_c for b in pos_g):
+            return "goods"
+    return None
 
 
 def key_of(title: str) -> str:
@@ -144,13 +181,18 @@ def main() -> None:
     if not cfg.get("enabled", True):
         return
     max_age = timedelta(days=cfg.get("max_age_days", 45))
+    goods_enabled = bool(cfg.get("goods_enabled", False))
+    goods_max_age = timedelta(days=cfg.get("goods_max_age_days", 7))
     now = datetime.now(timezone.utc)
 
     texts, errors = [], []
     if args.offline:
         texts = [(p, Path(p).read_text(encoding="utf-8")) for p in args.offline]
     else:
-        urls = [GNEWS.format(q=urllib.parse.quote(q)) for q in cfg.get("queries", [])]
+        queries = list(cfg.get("queries", []))
+        if goods_enabled:
+            queries += cfg.get("goods_queries", [])
+        urls = [GNEWS.format(q=urllib.parse.quote(q)) for q in queries]
         urls += [u.strip() for u in re.split(r"[,\s]+", os.environ.get("GOOGLE_ALERT_FEEDS", "")) if u.strip()]
         for u in urls:
             try:
@@ -168,22 +210,32 @@ def main() -> None:
     first_run = not SEEN.exists()
     seen: dict = {} if first_run else json.loads(SEEN.read_text(encoding="utf-8"))
 
-    new, batch = [], set()
+    today = now.astimezone(JST).date().isoformat()
+    # グッズ情報を初めて有効にした回は、これまでの記事を記録だけして通知しない（大量に届かないように）
+    goods_first = goods_enabled and "__goods_seeded__" not in seen
+    new, goods, batch = [], [], set()
     for it in sorted(items, key=lambda x: x["date"] or now, reverse=True):
-        if not it["title"] or not is_candidate(it["title"] + " " + it["summary"]):
+        if not it["title"]:
+            continue
+        kind = classify(it["title"], it["summary"], goods_enabled)
+        if not kind:
             continue
         k = key_of(it["title"])
         if k in seen or k in batch:
             continue
         batch.add(k)
-        seen[k] = {"t": it["title"][:80], "d": now.astimezone(JST).date().isoformat()}
-        if it["date"] and now - it["date"] > max_age:
-            continue  # 古い記事は記録だけして通知しない
-        new.append(it)
+        seen[k] = {"t": it["title"][:80], "d": today}
+        age = now - it["date"] if it["date"] else timedelta(0)
+        if kind == "event" and age <= max_age:
+            new.append(it)
+        elif kind == "goods" and age <= goods_max_age and not goods_first:
+            goods.append(it)
+    if goods_enabled and texts:
+        seen["__goods_seeded__"] = {"t": "meta", "d": today}
 
-    # 記録は半年分だけ残す
+    # 記録は半年分だけ残す（目印の __ で始まるものは残す）
     cutoff = (now - timedelta(days=180)).astimezone(JST).date().isoformat()
-    seen = {k: v for k, v in seen.items() if v.get("d", "") >= cutoff}
+    seen = {k: v for k, v in seen.items() if k.startswith("__") or v.get("d", "") >= cutoff}
     if texts:
         SEEN.parent.mkdir(exist_ok=True)
         SEEN.write_text(json.dumps(seen, ensure_ascii=False, indent=0) + "\n", encoding="utf-8")
@@ -195,42 +247,43 @@ def main() -> None:
 
     for old_file in ROOT.glob(MESSAGE_GLOB):
         old_file.unlink()
+
+    blocks = []  # 吹き出しに詰めていく文章のかたまり
     if first_run and texts:
-        head = ("📣 マイメロディの外部イベント情報の見張りを開始しました。\n"
-                "見つかったらお知らせします（AI判定なしのため、関係ない記事が混ざることがあります）。")
+        blocks.append("📣 マイメロディの外部イベント情報の見張りを開始しました。\n"
+                      "見つかったらお知らせします（AI判定なしのため、関係ない記事が混ざることがあります）。")
         if new:
-            head += f"\n\n▼ 直近の候補（{len(new)}件）"
+            blocks.append(f"▼ 直近の候補（{len(new)}件）")
     elif new:
-        head = f"📣 マイメロディの外部イベント候補が見つかりました（{len(new)}件）"
-    else:
-        head = ""
-    if head:
-        # 吹き出しに分けて全件送る（1回の送信で吹き出しは最大5つ。ピューロランドの通知用に1つ空けておく）
+        blocks.append(f"📣 マイメロディの外部イベント候補（{len(new)}件）")
+    blocks += [line(i) for i in new]
+    if goods_first and texts and not first_run:
+        blocks.append("🛍️ マイメロディのグッズ情報の通知を開始しました。次の新着からお知らせします。")
+    if goods:
+        blocks.append(f"🛍️ マイメロディのグッズ情報（{len(goods)}件）")
+        blocks += [line(i) for i in goods]
+
+    if blocks:
+        # 1回の送信で吹き出しは最大5つ。ピューロランドの通知用に1つ空けておく
         max_bubbles = int(os.environ.get("MYMELO_MAX_BUBBLES", "4"))
-        bubbles, cur = [], head
-        for i, it in enumerate(new):
-            block = "\n\n" + line(it)
-            if len(cur) + len(block) > BUBBLE_CHARS:
-                bubbles.append(cur)
-                cur = f"（続き {len(bubbles) + 1}）"
-                if len(bubbles) == max_bubbles - 1 and \
-                        sum(len("\n\n" + line(x)) for x in new[i:]) + len(cur) > BUBBLE_CHARS:
-                    # 最後の吹き出しにも収まらない分は件数だけ伝える
-                    rest = []
-                    for x in new[i:]:
-                        b = "\n\n" + line(x)
-                        if len(cur) + len(b) + 40 > BUBBLE_CHARS:
-                            break
-                        cur += b
-                        rest.append(x)
-                    cur += f"\n\nほか {len(new) - i - len(rest)}件（入りきりませんでした）"
+        bubbles, cur, dropped = [], "", 0
+        for i, b in enumerate(blocks):
+            add = ("\n\n" if cur else "") + b
+            if cur and len(cur) + len(add) > BUBBLE_CHARS:
+                if len(bubbles) == max_bubbles - 1:
+                    dropped = sum(1 for x in blocks[i:] if x.startswith("🔸"))
                     break
-            cur += block
+                bubbles.append(cur)
+                cur, add = b, b
+                continue
+            cur += add
+        if dropped:
+            cur += f"\n\nほか {dropped}件（入りきりませんでした）"
         bubbles.append(cur)
         for n, text in enumerate(bubbles, 1):
             (ROOT / f"message_mymelo_{n}.txt").write_text(text.strip(), encoding="utf-8")
         print("\n\n----- 吹き出しの区切り -----\n\n".join(bubbles))
-        print(f"\n（吹き出し {len(bubbles)}個 / 候補 {len(new)}件）")
+        print(f"\n（吹き出し {len(bubbles)}個 / イベント {len(new)}件 / グッズ {len(goods)}件）")
     else:
         print(f"新しい候補なし（記事{len(items)}件を確認）")
 

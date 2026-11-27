@@ -28,6 +28,12 @@
       "マイメロディ (グリーティング OR 撮影会 OR 会える OR 会いに OR やってくる OR ふれあい OR ハイタッチ OR 来店 OR ステージ OR ショー)",
       "マイメロ (グリーティング OR 撮影会 OR 会える OR やってくる OR ハイタッチ)"
     ],
-    "max_age_days": 45
+    "max_age_days": 45,
+    "_comment_goods": "goods_enabled を false にすると、グッズ情報の通知だけ止まります（イベント情報はそのまま）",
+    "goods_enabled": true,
+    "goods_queries": [
+      "マイメロディ (グッズ OR 発売 OR 新作 OR コラボ OR 限定)"
+    ],
+    "goods_max_age_days": 7
   }
 }
