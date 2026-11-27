@@ -20,5 +20,14 @@
   ],
   "days_ahead": 45,
   "reminder_time": "20:00",
-  "calendar_name": "ピューロランド グリーティング"
+  "calendar_name": "ピューロランド グリーティング",
+  "external_events": {
+    "_comment": "マイメロディの外部イベント（商業施設などのグリーティング）をGoogleニュースで探す。queries は検索語（OR で言い換えをまとめられる）",
+    "enabled": true,
+    "queries": [
+      "マイメロディ (グリーティング OR 撮影会 OR 会える OR 会いに OR やってくる OR ふれあい OR ハイタッチ OR 来店 OR ステージ OR ショー)",
+      "マイメロ (グリーティング OR 撮影会 OR 会える OR やってくる OR ハイタッチ)"
+    ],
+    "max_age_days": 45
+  }
 }

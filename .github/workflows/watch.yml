@@ -17,6 +17,7 @@ on:
     branches: [main]
     paths:
       - "piano_watch.py"
+      - "mymelo_watch.py"
       - "config.json"
       - ".github/workflows/watch.yml"
 
@@ -46,6 +47,11 @@ jobs:
       - name: Check schedule
         run: python3 piano_watch.py
 
+      - name: Check My Melody external events
+        env:
+          GOOGLE_ALERT_FEEDS: ${{ secrets.GOOGLE_ALERT_FEEDS }}   # GoogleアラートのRSS URL（任意・複数はカンマ区切り）
+        run: python3 mymelo_watch.py || echo "- [マイメロ外部イベント] スクリプトが異常終了しました" >> errors.md
+
       - name: Test message
         if: inputs.test
         run: |
@@ -69,7 +75,7 @@ jobs:
           git push
 
       - name: Send LINE
-        if: hashFiles('message.txt') != ''
+        if: hashFiles('message.txt', 'message_mymelo.txt') != ''
         env:
           LINE_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_TO: ${{ secrets.LINE_TO }}   # 送信先のユーザーID（カンマ区切り）
@@ -79,9 +85,10 @@ jobs:
             exit 0
           fi
           # 登録したユーザーIDの人だけに送る（友だち全員への一斉送信はしない）
-          jq -Rs --arg to "$LINE_TO" \
-            '{to: ($to | split(",") | map(gsub("\\s"; "")) | map(select(length > 0))), messages: [{type: "text", text: .}]}' \
-            message.txt > payload.json
+          # グリーティング日程とマイメロ外部イベントは、1回の送信に別々の吹き出しでまとめる
+          msgs=$(for f in message.txt message_mymelo.txt; do [ -s "$f" ] && jq -Rs '{type: "text", text: .}' "$f"; done | jq -s '.')
+          jq -n --arg to "$LINE_TO" --argjson m "$msgs" \
+            '{to: ($to | split(",") | map(gsub("\\s"; "")) | map(select(length > 0))), messages: $m}' > payload.json
           code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST https://api.line.me/v2/bot/message/multicast \
             -H "Authorization: Bearer $LINE_TOKEN" -H "Content-Type: application/json" -d @payload.json)
           echo "LINE: HTTP $code"; cat resp.txt; echo
