@@ -96,6 +96,41 @@ def is_candidate(title: str, summary: str = "") -> bool:
     return any(abs(a - b) <= 40 for a in pos_c for b in pos_k)
 
 
+# 開催後のレポート・開催中の記事（これから行ける情報ではないもの）
+AFTER_THE_FACT = ("開催中", "実施中", "開催しました", "開催された", "行ってきた", "行ってみた",
+                  "レポート", "レポ", "体験してきた", "大盛況", "終了")
+DATE_RE = re.compile(r"(?:(\d{4})年)?\s*(\d{1,2})月\s*(\d{1,2})日")
+SLASH_DATE_RE = re.compile(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?![\d/])")  # 「11/29」形式
+
+
+def event_dates(text: str, today) -> list:
+    """タイトル中の「(2026年)11月29日」などを日付にする。年が無いときは今日に近い年を補う。"""
+    from datetime import date as _d
+    out = []
+    found = DATE_RE.findall(norm(text)) + [("", m, d) for m, d in SLASH_DATE_RE.findall(norm(text))]
+    for y, m, d in found:
+        try:
+            if y:
+                out.append(_d(int(y), int(m), int(d)))
+                continue
+            cand = _d(today.year, int(m), int(d))
+            # 今日より200日以上前の日付なら、来年の話とみなす（例：11月に「1月10日開催」）
+            if (today - cand).days > 200:
+                cand = _d(today.year + 1, int(m), int(d))
+            out.append(cand)
+        except ValueError:  # 13/45 のような日付でないもの
+            pass
+    return out
+
+
+def is_upcoming(title: str, today) -> bool:
+    """これから行けるイベントか。開催後のレポートや、書かれている日付がすべて過ぎている記事は除く。"""
+    if _has(norm(title), AFTER_THE_FACT):
+        return False
+    dates = event_dates(title, today)
+    return not dates or max(dates) >= today
+
+
 # グッズ情報として通知しないもの（グッズではない話題）
 EXCLUDE_GOODS = ("アニメ", "映画", "ゲーム", "アプリ", "びょんわぁ", "ショー", "ステージ")
 GOODS_TITLE_HINT = ("サンリオ",)  # タイトルにマイメロが無くても、抜粋で判定してよい記事の目印
@@ -226,9 +261,10 @@ def main() -> None:
         batch.add(k)
         seen[k] = {"t": it["title"][:80], "d": today}
         age = now - it["date"] if it["date"] else timedelta(0)
-        if kind == "event" and age <= max_age:
+        if kind == "event" and age <= max_age and is_upcoming(it["title"], now.astimezone(JST).date()):
             new.append(it)
-        elif kind == "goods" and age <= goods_max_age and not goods_first:
+        elif kind == "goods" and age <= goods_max_age and not goods_first \
+                and is_upcoming(it["title"], now.astimezone(JST).date()):
             goods.append(it)
     if goods_enabled and texts:
         seen["__goods_seeded__"] = {"t": "meta", "d": today}
